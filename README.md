@@ -4,7 +4,7 @@ Setup script for a fresh **RetroPie 4.8** card (Raspberry Pi OS Buster) on a **R
 It reproduces the tuning of one specific RetroPie build: fan, overclock, Bluetooth audio, RetroArch
 settings, the Virtual Boy core, and Tailscale.
 
-> **Status: v0.1, not yet run on a real card.** Always start with `--dry-run`.
+> **Status: v0.1.** Run stage by stage on a fresh RetroPie 4.8 card (Raspberry Pi 3 Model B Rev 1.2) on 2026-11-25: fan, config, Bluetooth, RetroArch, Virtual Boy and Tailscale all completed, a reboot kept them working, and a second run is a no-op. Always start with `--dry-run`.
 
 It is for RetroPie Pi 3B cards only and refuses to run on anything else (wrong board, not Buster,
 RetroPie missing, or running as root). It contains no ROMs and no BIOS files.
@@ -33,6 +33,7 @@ sudo reboot
 | `--only a,b` / `--skip a,b` | Run or skip steps: `fan config bluetooth retroarch vb tailscale` |
 | `--bt-mac MAC` | Bluetooth speaker address for RetroArch audio (not stored in the repo) |
 | `--static-ip IP` | Opt-in: write a dhcpcd static address for `wlan0` (applies at next reboot) |
+| `--fix-apt-mirror` | Opt-in: repoint `/etc/apt/sources.list` from the dead `raspbian.raspberrypi.org` Buster mirror to `legacy.raspbian.org` (backup kept). A fresh RetroPie 4.8 image needs this, or `apt-get update` fails. |
 
 Settings can be overridden with environment variables: `FAN_REF`, `FAN_CURVE`, `TS_HOSTNAME`, `IFACE`,
 `GATEWAY`, `DNS_SERVER`, `ALLOW_OC_WITHOUT_FAN=1` (accept the risk of overclocking without a fan).

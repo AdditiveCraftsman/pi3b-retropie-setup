@@ -15,9 +15,11 @@
 #   verify     prints a health summary (always runs last)
 # Opt-in only (changes the network, never runs by default):
 #   --static-ip 192.168.10.202   writes a dhcpcd static address for wlan0 (applies at next reboot)
+#   --fix-apt-mirror             repoints /etc/apt/sources.list from the dead raspbian.raspberrypi.org
+#                                Buster mirror to legacy.raspbian.org (backup kept). Needed on a fresh 4.8 image.
 #
 # Usage: ./retropie-setup.sh [--dry-run] [--only step,step] [--skip step,step]
-#                            [--bt-mac AA:BB:CC:DD:EE:FF] [--static-ip IP] [--help]
+#                            [--bt-mac AA:BB:CC:DD:EE:FF] [--static-ip IP] [--fix-apt-mirror] [--help]
 set -euo pipefail
 
 VERSION="0.1"
@@ -36,7 +38,7 @@ MARK_BEGIN="# BEGIN retropie-setup.sh managed block"
 MARK_END="# END retropie-setup.sh managed block"
 ALL_STEPS=(preflight fan config bluetooth retroarch vb tailscale verify)
 
-DRY_RUN=0; BT_MAC=""; STATIC_IP=""; ONLY=""; SKIP=""
+DRY_RUN=0; BT_MAC=""; STATIC_IP=""; ONLY=""; SKIP=""; FIX_MIRROR=0
 
 log()  { printf '\n==> %s\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
@@ -89,6 +91,23 @@ valid_ipv4() { [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 
 # ---- steps ----
 
+# Raspbian Buster is end-of-life: raspbian.raspberrypi.org no longer serves its Release file.
+# legacy.raspbian.org still does (checked Nov 25 2026).
+check_apt_mirror() {
+  local list=/etc/apt/sources.list old='raspbian.raspberrypi.org/raspbian/' new='legacy.raspbian.org/raspbian/'
+  grep -q "$old" "$list" 2>/dev/null || return 0
+  if curl -sfI --max-time 10 "http://${old}dists/buster/Release" >/dev/null 2>&1; then return 0; fi
+  if ((FIX_MIRROR)); then
+    info "apt mirror ${old%/raspbian/} is dead; repointing $list to ${new%/raspbian/}"
+    run sudo cp -n "$list" "$list.bak-retropie-setup"
+    run sudo sed -i "s#${old}#${new}#" "$list"
+  elif ((DRY_RUN)); then
+    warn "apt mirror ${old%/raspbian/} is dead (Buster is end-of-life). Real run needs: --fix-apt-mirror"
+  else
+    die "apt mirror ${old%/raspbian/} is dead (Buster is end-of-life), so apt-get update will fail. Re-run with --fix-apt-mirror to repoint it to ${new%/raspbian/}."
+  fi
+}
+
 step_preflight() {
   log "Preflight"
   ((EUID != 0)) || die "run as the normal user (pi), not root; the script uses sudo where needed"
@@ -104,6 +123,7 @@ step_preflight() {
   [[ -f $RA_CFG ]] || die "$RA_CFG not found; start EmulationStation once so RetroPie creates it"
   sudo -v || die "sudo is required"
   getent hosts github.com >/dev/null || die "no DNS/network: cannot resolve github.com"
+  check_apt_mirror
   local free_mb; free_mb=$(df -Pm / | awk 'NR==2{print $4}')
   info "free space on /: ${free_mb} MB"
   ((free_mb > 1500)) || die "less than 1.5 GB free on /"
@@ -118,7 +138,11 @@ step_fan() {
   else run git clone "$FAN_REPO" "$dir"; fi
   run git -C "$dir" checkout --quiet "$FAN_REF"
   ((DRY_RUN)) || [[ -x $dir/install-pwm-fan.sh || -f $dir/install-pwm-fan.sh ]] || die "install-pwm-fan.sh not found in $dir at $FAN_REF"
-  ( cd "$dir" && run sudo bash ./install-pwm-fan.sh --curve "$FAN_CURVE" )
+  if ((DRY_RUN)); then
+    info "[dry-run] (cd $dir && sudo bash ./install-pwm-fan.sh --curve $FAN_CURVE)"
+  else
+    ( cd "$dir" && sudo bash ./install-pwm-fan.sh --curve "$FAN_CURVE" )
+  fi
   if ! ((DRY_RUN)); then
     for s in pigpiod pwm-fan; do systemctl is-active --quiet "$s" && info "$s: active" || warn "$s is not active"; done
   fi
@@ -142,7 +166,8 @@ step_config() {
 
 step_bluetooth() {
   log "Bluetooth audio (bluealsa)"
-  if ! apt-cache policy bluealsa 2>/dev/null | grep -q 'Candidate: [^(]'; then
+  local cand; cand=$(apt-cache policy bluealsa 2>/dev/null | awk '/Candidate:/{print $2; exit}' || true)
+  if [[ -z $cand || $cand == "(none)" ]]; then
     die "no bluealsa package candidate in apt. Build it from source or tell Claude; do not continue blind."
   fi
   run sudo apt-get install -y bluealsa bluez
@@ -225,7 +250,8 @@ step_verify() {
   info "model:    $(tr -d '\0' </proc/device-tree/model)"
   info "temp:     $(vcgencmd measure_temp 2>/dev/null || echo n/a)"
   info "throttle: $(vcgencmd get_throttled 2>/dev/null || echo n/a)   (want 0x0)"
-  info "arm_freq: $(vcgencmd get_config arm_freq 2>/dev/null | tr '\n' ' ')   (shows 1350 only after the reboot)"
+  local af; af=$(vcgencmd get_config arm_freq 2>/dev/null | tr '\n' ' ')
+  if [[ $af == *arm_freq=1350* ]]; then info "arm_freq: $af"; else info "arm_freq: $af  (1350 expected after a reboot if the config step ran)"; fi
   for s in pigpiod pwm-fan bluetooth bluealsa tailscaled; do
     info "$s: $(systemctl is-active "$s" 2>/dev/null || true)"
   done
@@ -243,6 +269,7 @@ main() {
       --skip)      SKIP=${2:?--skip needs a value}; shift ;;
       --bt-mac)    BT_MAC=${2:?--bt-mac needs a value}; shift ;;
       --static-ip) STATIC_IP=${2:?--static-ip needs a value}; shift ;;
+      --fix-apt-mirror) FIX_MIRROR=1 ;;
       -h|--help)   usage; exit 0 ;;
       *) die "unknown option: $1 (try --help)" ;;
     esac; shift
@@ -265,7 +292,7 @@ main() {
     "step_$s"
   done
   log "Done. Log: $LOG"
-  info "Reboot to apply config.txt and static-IP changes."
+  info "Reboot if the config or static-IP step changed anything."
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi
